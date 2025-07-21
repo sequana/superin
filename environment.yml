@@ -1,0 +1,10 @@
+name: sequana_superin
+
+channels:
+- conda-forge
+- bioconda
+- defaults
+- r
+
+dependencies:
+- graphviz

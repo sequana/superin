@@ -1,0 +1,714 @@
+
+# The nanocap pipeline maps data onto reference, filter them, 
+# create plots and provide final BAM files
+
+# Here, we use the BAM files to create extra plots
+# First, we filter the BAM files based on the plasmid used.
+
+from sequana_pipetools import snaketools as sm
+ 
+configfile: "config.yaml"
+manager = sm.PipelineManager("superin", config)
+expected_output = []
+
+import pandas as pd
+df = pd.read_csv(config["samplesheet"])
+labels = df['sample']
+if len(df.plasmid.dropna()):
+    use_plasmids = True
+else:
+    use_plasmids = False
+
+expected_output = [
+        expand("SI/fastq/{label}_reads_with_deletions.fastq", label=labels),
+        expand("SI/fasta/{label}_reads_with_deletions.fasta", label=labels),
+        expand("SI/fastq/{label}_reads_with_insertions.fastq", label=labels),
+        expand("SI/fasta/{label}_reads_with_insertions.fasta", label=labels),
+        "nanocap_filtered_fastqs/stats.csv",
+        "SI/position_deletions.png",
+        "SI/position_insertions.png",
+        "SI/distribution_entropy_of_deletions_insertions_on_SI.csv",
+        ".sequana/rulegraph.svg",
+        expand("SI/distribution_entropy_of_deletions_insertions_on_SI_{label}.png", label=labels)
+]
+
+
+if use_plasmids:
+    expected_output += [
+        "plasmids/deletions_insertions_stats.csv",
+        expand("plasmids/{label}_deletions_distribution.png", label=labels),
+        expand("plasmids/{label}_insertions_distribution.png",label=labels),
+        "mapped_insertions_on_SI/insertions_summary.csv",
+    ]
+
+rule all:
+    input:
+        expected_output
+
+
+super_integron_reference=config['SI_reference_file']
+
+import pandas as pd
+df = pd.read_csv(config["samplesheet"])
+samples_plasmids = dict([(x,y) for x, y in zip(
+                                                df["sample"].values, 
+                                                df["plasmid"].values)
+                        ])
+
+samples_references = dict([(x,config['plasmids_directory'] + "/" + y) for x, y in zip(
+                                                df["sample"].values, 
+                                                df["reference"].values)
+                        ])
+
+
+
+
+def get_bam(wildcards):
+    plasmid = samples_plasmids[wildcards.label]
+    return f"filtered_BAM_files/{wildcards.label}.{plasmid}.sorted.bam"
+
+
+def get_fasta(wildcards):
+    label = wildcards.label
+    return samples_references[label]
+
+if use_plasmids:
+
+    rule filter_nanocap_BAM:
+        """Filter nanocap BAM to keep only those on the plasmid"""
+        input:
+            bam=config['input_bam_pattern'] + "/{label}.sorted.bam"
+        output:
+            bam="filtered_BAM_files/{label}.{plasmid}.sorted.bam",
+            bai="filtered_BAM_files/{label}.{plasmid}.sorted.bam.bai"
+        container:
+            config['apptainers']['tools']
+        shell:
+            """
+            samtools index {input.bam}
+            samtools view -b -h {input.bam} {wildcards.plasmid} > {output.bam}
+            samtools index {output.bam}
+            """
+
+    rule scatter_plots:
+        input: 
+            bam = get_bam,
+            fasta = get_fasta
+        output:
+            png_del="plasmids/{label}_deletions_distribution.png",
+            csv_del="plasmids/{label}_deletions_distribution.csv",
+            png_ins="plasmids/{label}_insertions_distribution.png",
+            csv_ins="plasmids/{label}_insertions_distribution.csv",
+            stats="plasmids/{label}_summary.csv"
+        params:
+            min_length=config["INDELs_filter"]["minimal_indel_length"]
+        run:
+            from sequana_pipelines.superin import tools
+            import matplotlib
+            matplotlib.use("Agg")
+            from pylab import plot, savefig
+            from sequana.viz import ScatterHist
+
+
+            data, stats = tools.get_INDELs(input.bam, input.fasta, minimal_length_indels=params.min_length)
+            N = len(df)
+
+            for typ_ in ['D', 'I']:
+
+                try:
+                    dd = data.query("typ==@typ_ and L>=@params.min_length")[['rpos', 'L']]
+                except:
+                    dd = data
+
+                im = ScatterHist(dd)
+                ax0, axX, axY = im.plot(kargs_histx={'bins': range(0,6000, 100)}, 
+                            kargs_histy={'bins': range(0,2600, 100)})
+                ax0.set_xlim([0, 6000])
+                ax0.set_ylim([0, 2600])
+                axX.set_xlim([0, 6000])
+                axY.set_ylim([0, 2600])
+                axX.set_xticklabels([])
+                axY.set_yticklabels([])
+
+                # read again to save more information
+                try:
+                    dd = data.query("typ==@typ_ and L>=@params.min_length")
+                except:
+                    dd = data
+
+                if typ_ == 'D':
+                    savefig(output.png_del, dpi=200)
+                    dd.to_csv(output.csv_del, index=False)
+                else:
+                    savefig(output.png_ins, dpi=200)
+                    dd.to_csv(output.csv_ins, index=False)
+
+            with open(output.stats, "w") as fout:
+                fout.write(f"sample,nreads,insertion,deletion\n{wildcards.label},{stats['N']},{stats['insertions']},{stats['deletions']}\n")
+
+
+    rule gather_stats:
+        input:
+            expand("plasmids/{label}_summary.csv", label=labels)
+        output:
+            csv = "plasmids/deletions_insertions_stats.csv"
+        run:
+            import pandas as pd
+            df = pd.concat([pd.read_csv(file) for file in input], axis=0)
+            df = df[['sample', 'nreads', 'insertion', 'deletion']]
+            df.to_csv(output.csv, index=False)
+
+
+    # from mapped data, identify insertions on plasmid to map back later
+    # on the SI.
+    rule save_plasmid_insertions_in_fastq:
+        input:
+            bam = get_bam,
+            fasta = get_fasta,
+            fastq = config["input_directory"] + "/{label}.fastq.gz"
+        output:
+            fastq = "mapped_insertions_on_SI/insertions_{label}.fastq"
+        params:
+            min_length=config["INDELs_filter"]["minimal_indel_length"]
+        run:
+            from sequana_pipelines.superin import tools
+            from sequana import FastQ
+            df, stats = tools.get_INDELs(input.bam, input.fasta, params.min_length)
+            try:
+                identifiers = df.query("typ=='I'").qname.values
+                f = FastQ(input.fastq)
+                f.select_reads(identifiers, output.fastq)
+            except:
+                with open(output.fastq, "w") as fout:
+                    seq = "G" * 80
+                    fout.write(f">dummy\n{seq}\n+\n{seq}")
+
+
+rule mapped_on_SI:
+    """map the nanocap output files onto the SI only"""
+    input:
+        fastq = config['input_directory'] + "/{label}.fastq.gz",
+        SI=super_integron_reference
+    output:
+        bam="SI/{label}.sorted.bam",
+        bai="SI/{label}.sorted.bam.bai"
+    container:
+        config['apptainers']['tools']
+    log:
+        "SI/mapped_on_SI.{label}.log.txt"
+    shell:
+        """
+        minimap2 -t 4 -x map-ont -a {input.SI} {input.fastq} 2>{log} | samtools view -bh | samtools sort > {output.bam} 
+        samtools index {output.bam}
+        """
+
+if use_plasmids:
+    rule map_back_insertions_on_SI:
+        input:
+            fastq=rules.save_plasmid_insertions_in_fastq.output.fastq,
+            SI=super_integron_reference
+        output:
+            bam = "mapped_insertions_on_SI/insertions_{label}.sorted.bam",
+            bai = "mapped_insertions_on_SI/insertions_{label}.sorted.bam.bai"
+        container:
+            config['apptainers']['tools']
+        log:
+            "mapped_insertions_on_SI/map_back_insertions_on_SI.{label}.log.txt"
+        shell:
+            """
+            minimap2 -t 4 -x map-ont -a {input.SI} {input.fastq} 2>{log} | samtools view -bh | samtools sort > {output.bam} 
+            samtools index {output.bam}
+            """
+
+    rule ind_insertions_stats:
+        input:
+            bam=rules.map_back_insertions_on_SI.output.bam
+        output:
+            csv="mapped_insertions_on_SI/insertions_summary_SI_{label}.csv"
+        run:
+            from sequana import BAM
+            b = BAM(input.bam)
+            tempdf = b.get_df().query("flag in [0,16]")
+            tempdf.to_csv(output.csv, sep=',', index=False)
+
+    rule insertion_stats:
+        input:
+            expand(
+                "mapped_insertions_on_SI/insertions_summary_SI_{label}.csv",
+                label=labels)
+        output:
+            csv="mapped_insertions_on_SI/insertions_summary.csv"
+        run:
+            import pandas as pd
+            data = pd.concat([pd.read_csv(x) for x in input], axis=0)
+            data.to_csv(output.csv, index=False)
+
+
+rule get_excision:
+    """excision found in SI as deletions
+
+    Here the input is the3 nanocap output (filtered for low quality reads)
+    """
+    input:
+        bam=rules.mapped_on_SI.output.bam,
+        bai=rules.mapped_on_SI.output.bai,
+        fasta=super_integron_reference
+    output:
+        png="SI/distribution_entropy_of_deletions_insertions_on_SI_{label}.png",
+        png_hist_del="SI/hist_deletions_on_SI_{label}.png",
+        json="SI/distribution_entropy_of_deletions_insertions_on_SI_{label}.json",
+        csv_del="SI/summary_deletions_{label}.csv",
+        csv_ins="SI/summary_insertions_{label}.csv"
+    params:
+        entropy=config['INDELs_filter']['entropy_above'],
+        start_position=config['INDELs_filter']['SI_start_position'],
+        min_length=config['INDELs_filter']['minimal_indel_length']
+    run:
+        import matplotlib
+        matplotlib.use('Agg')
+        from pylab import xlabel, ylabel, legend, savefig, plot, clf
+        from sequana_pipelines.superin import tools
+        from numpy import linspace
+        deletions, stats = tools.get_INDELs(input.bam, input.fasta, 
+            minimal_length_indels=params.min_length)
+        stats['sample'] = wildcards.label
+
+        if len(deletions):
+            deletions.query("typ=='I'").entropy.hist(alpha=0.5, density=True,
+                bins=linspace(0,1.5,100), label='insertion')
+            deletions.query("typ=='D'").entropy.hist(alpha=0.5, density=True,
+                bins=linspace(0,1.5,100), label='deletion')
+            xlabel('entropy')
+            legend()
+            savefig(output.png)
+        
+            # save deletions
+            DEL = deletions.query("entropy>@params.entropy and typ=='D' and rpos>@params.start_position")[['qpos', 'L', 'rpos', 'sequence', 'qname', 'entropy']]
+            DEL.to_csv(output.csv_del , index=False)
+            clf()
+            DEL.L.hist(bins=50)
+            savefig(output.png_hist_del)
+
+
+            IN = deletions.query("entropy>@params.entropy and typ=='I' and rpos>@params.start_position")[['qpos', 'L', 'rpos', 'sequence', 'qname', 'entropy']]
+            IN.to_csv(output.csv_ins , index=False)
+            stats['filtered_deletions'] = len(DEL)
+            stats['filtered_insertions'] = len(IN)
+            stats['percent_filtered_deletions'] = round(len(DEL) / stats['N'] * 100,3)
+            stats['percent_filtered_insertions'] = round(len(IN) / stats['N'] * 100,3)
+
+        else:
+            plot([0],[0])
+            savefig(output.png)
+
+            # save empty deletions file
+
+        # save a common json file
+        import pandas as pd
+        import json
+        with open(output.json, 'w') as fout:
+            json.dump(stats, fout)
+
+
+rule create_SI_images_INDELs_positions:
+    input:
+        expand("SI/summary_deletions_{label}.csv", label=labels),
+        expand("SI/summary_insertions_{label}.csv", label=labels)
+    output:
+        deletions="SI/position_deletions.png",
+        insertions="SI/position_insertions.png"
+    run:
+        import pandas as pd
+        from pylab import legend, savefig, clf
+        import matplotlib
+        matplotlib.use('Agg')
+        for label in labels:
+            df = pd.read_csv(f"SI/summary_deletions_{label}.csv")
+            df.rpos.hist(bins=200, label=label)
+        legend()
+        savefig(output.deletions)
+        clf()
+        for label in labels:
+            df = pd.read_csv(f"SI/summary_insertions_{label}.csv")
+            df.rpos.hist(bins=200, label=label)
+        legend()
+        savefig(output.insertions)
+
+
+
+rule get_excision_stats:
+    input:
+        json = expand(
+            "SI/distribution_entropy_of_deletions_insertions_on_SI_{label}.json",
+            label=labels)
+    output:
+        csv = "SI/distribution_entropy_of_deletions_insertions_on_SI.csv"
+    run:
+        import pandas as pd
+        data = pd.concat([pd.read_json(x, typ='series') for x in input.json], axis=1)
+        data.columns = labels
+        data = data.T
+        data.to_csv(output.csv, index=False)
+
+
+rule get_fastq_fasta_deletions:
+    input:
+        csv=rules.get_excision.output.csv_del,
+        fastq = config["input_directory"] + "/{label}.fastq.gz",
+    output:
+        fastq="SI/fastq/{label}_reads_with_deletions.fastq",
+        fasta="SI/fasta/{label}_reads_with_deletions.fasta"
+    run:
+        import pandas as pd
+        from sequana import FastQ
+        identifiers = pd.read_csv(input.csv)['qname'].values
+        f = FastQ(input.fastq)
+        f.select_reads(identifiers, output.fastq)
+        f = FastQ(output.fastq)
+        f.to_fasta(output.fasta)
+
+
+
+rule get_fastq_fasta_insertions:
+    input:
+        csv=rules.get_excision.output.csv_ins,
+        fastq = config["input_directory"] + "/{label}.fastq.gz",
+    output:
+        fastq="SI/fastq/{label}_reads_with_insertions.fastq",
+        fasta="SI/fasta/{label}_reads_with_insertions.fasta"
+    run:
+        import pandas as pd
+        from sequana import FastQ
+        identifiers = pd.read_csv(input.csv)['qname'].values
+        f = FastQ(input.fastq)
+        f.select_reads(identifiers, output.fastq)
+        f = FastQ(output.fastq)
+        f.to_fasta(output.fasta)
+
+
+
+
+
+
+
+
+rule individual_fastq_stats:
+    input:
+        fastq=config["input_directory"] +"/{label}.fastq.gz"
+    output:
+        json="nanocap_filtered_fastqs/{label}.json"
+    run:
+        from sequana import FastQ
+        f = FastQ(input.fastq)
+        stats = f.stats()
+        stats['sample'] = wildcards.label
+        from sequana_pipelines.superin import tools
+        tools.save_json(output.json, stats)
+
+
+rule fastq_stats:
+    input:
+         json=expand(
+            "nanocap_filtered_fastqs/{label}.json", label=labels)
+    output:
+        csv="nanocap_filtered_fastqs/stats.csv"
+    run:
+        import pandas as pd
+        data = pd.concat([pd.read_json(x, typ='series') for x in input.json], axis=1)
+        data = data.T
+        data.set_index("sample", inplace=True)
+        data.to_csv(output.csv, index=True)
+
+rule rulegraph:
+    input:
+        workflow.snakefile,
+    output:
+        "rulegraph/rulegraph.dot",
+    params:
+        configname="config.yaml",
+        mapper = {},
+    wrapper:
+        f"{manager.wrappers}/wrappers/rulegraph"
+
+
+rule dot2svg:
+    input:
+        "rulegraph/rulegraph.dot"
+    output:
+        ".sequana/rulegraph.svg"
+    container:
+        config['apptainers']['graphviz']
+    shell:
+        """dot -Tsvg {input} -o {output}"""
+
+
+########################################################################33
+
+
+
+def get_SI_images_html():
+
+    html  = '<div class="image-grid">'
+    for label in labels:
+        html +=f'<figure><img src="SI/distribution_entropy_of_deletions_insertions_on_SI_{label}.png"><figcaption>{label}</figcaption></figure>'
+    html += '</div>'
+
+    return html
+
+def get_html_table(df, name, index=False, filename="data.csv"):
+    from sequana.utils.datatables_js import DataTable
+    dt = DataTable(df, name, index=index)
+    dt.datatable.datatable_options = {'pageLength': 10,
+                                       'dom': 'Brt',
+                                        'filename': filename,
+                    'order':[],
+                                       'buttons': ['copy', 'csv']}
+    return dt.create_javascript_function() +  dt.create_datatable()
+
+
+def report_intro():
+    return """
+    <p>We first run the <a href="https://github.com/sequana/nanocap">Nanocap pipeline</a>
+    to map the Nanopore data onto the references to be found in <a href="./references">directory</a> depending on the sample, as described here below. The BAM files </p>
+    """
+
+
+def report_sample_information():
+
+    from sequana import FastA
+    html = """<h1 id="info">Sample information</h1>"""
+    html += "<p> Here is the correspondance of samples and plasmids used. </p>"
+    # sample information
+    samples = sorted(samples_plasmids.keys())
+    df = pd.DataFrame({
+            'sample': samples, 
+            'plasmid': [samples_plasmids[x] for x in samples],
+            'reference': [samples_references[x] for x in samples]
+        })
+    #Get plasmids size and therefore length to estimate coverage
+    lengths = {}
+    for name, ref in zip(df['plasmid'], df['reference']):
+        f = FastA(ref)
+        lengths.update(f.get_lengths_as_dict())
+    df['size'] = [lengths[x] for x in df['plasmid']]
+    html += get_html_table(df, "info")
+
+    return html
+
+def report_plasmids_scatter_plots():
+    # scatter plots
+    html ="<h3>Insertions</h3>"
+    html += '<div class="image-grid">'
+    for label in labels:
+        html += f'<figure><img src="plasmids/{label}_insertions_distribution.png"><figcaption>{label}</figcaption></figure>'
+    html += '</div>'
+
+    html += "<h3>Deletions</h3>"
+    html += '<div class="image-grid">'
+    for label in labels:
+        html += f'<figure><img src="plasmids/{label}_deletions_distribution.png"><figcaption>{label}</figcaption></figure>'
+    html += '</div>'
+
+    return html
+
+
+def get_html_plasmid_stats():
+
+    # stats on plasmids
+    stats = pd.read_csv(rules.fastq_stats.output.csv)
+    stats = stats.reset_index()
+    stats = stats[["sample", 'N', 'mean_length']]
+    stats["mean_length"] = [int(x) for x in stats.mean_length.values]
+    stats.columns = ["sample", "Number of reads (>1000bp)", "Mean read length (>1000bp)"]
+    table_html_mapped_reads_plasmids = get_html_table(stats, "stats_plasmids")
+    return table_html_mapped_reads_plasmids
+
+def report_plasmids_description():
+
+    html_info_INDELs = """
+<h2>Insertions/Deletions on the plasmids</h2>
+We extract the INDELs from the BAM files, filtered INDELs with size below 100bp to keep only the largest ones. We save information about the deletions and insertions in CSV files that are provided in the <a href="./plasmids">plasmids/</a> directory. They are called SAMPLE_deletions_distribution.csv and SAMPLE_insertions_distribution.csv an. They are in CSV format with this header/example
+    
+    <pre>    typ,qpos,L,rpos,sequence,qname,rname,entropy
+    D,4994,857,4532,TCAGAACTTT...,7e95b8e9-86d7-492a-91f6-5fab173b671f,2,1.3856637221270693
+    </pre>
+    <br>
+    where columns are as follows:
+    <ul>
+        <li>'typ' is D for deletion, I for insertion</li>
+        <li>qpos the position on the read </li>
+        <li>L the size of the deletionsi/inserions</li>
+        <li>rpos is the position on the reference</li>
+<li>sequence is the insertion/deletion nucleotide sequence. deletion is inferred from the reference. </li>
+<li>qname, the unique identifier of the read (raw nanopore).</li>
+<li> rname is the reference index.</li>
+<li> entropy is the entropy of the sequence.  </li>
+</ul>
+
+We can look at the distributions of the insertions and deletions for each sample within the following parameter space: position on the plasmid versus length of the INDEL. In the scatter plot that follows we can see that insertions are localised on the plasmid and have imilar length while deletions are rare. 
+    """
+    return html_info_INDELs
+
+def report_plasmid_section():
+
+    table_html_mapped_reads_plasmids = get_html_plasmid_stats()
+
+    html = f"""
+    <h2 id="read_stats">Number of reads of interest</h2>
+    <p>We first filtered the BAM files from Nanocap to keep the reads that map on the plasmids. Those files are in the directory  
+    <a href="filtered_BAM_files">filtered_BAM_files</a> and can be visualised e.g. using<br>
+    <br><pre>
+    igv -g references/vibrio_and_pV827.fa  filtered_BAM_files/V961.p2594.sorted.bam
+    </pre>
+    The following table gives the number of reads and their mean length after filtering for reads with length below 1000bp. See nanocap reports for more details.
+    </p>
+    {table_html_mapped_reads_plasmids}
+    """
+    return html
+
+def report_plasmids_summary():
+    df = pd.read_csv(rules.gather_stats.output.csv)
+    html = "<h3>Summary</h3>"
+    html += get_html_table(df, "stast_indels", )
+    return html
+
+
+def report_SI_intro():
+    html = """
+    <h2 id="SI">INDELs on the SI.</h2>
+    We could map the insertions found in the plasmid onto the SI. However, they may not map well since they are flanked by plasmids regions. Instead, it is better to identify them by searching for large deletions in the SI. We filter reads that have a length below 1000bp. We also filter the INDELs with length below 100bp. Here below we show the entropy of the insertions and deletions. Most insertions have low entropy and should probably be discared."""
+
+    return html
+
+def report_SI_stats():
+    html = ""
+
+    df = pd.read_csv("SI/distribution_entropy_of_deletions_insertions_on_SI.csv")
+    df["mapped reads"] = df['N']
+    df = df.set_index('sample').T
+    df = df.loc[[
+            'mapped reads',
+            'insertions',
+            'deletions',
+            'percent_insertions',
+            'percent_deletions',
+            'filtered_deletions',
+            'filtered_insertions',
+            'percent_filtered_insertions',
+            'percent_filtered_deletions',
+        ]]
+    html += get_html_table(df, "stats_SI", index=True)
+    return html
+
+def report_SI_table():
+
+    html_SI_stats = report_SI_stats()
+
+    html = f"""
+    <p>we can keep reads with correct flag (mapped), and keep reads that have position above  {config["INDELs_filter"]["SI_start_position"]} on the SI. We can also filter event with low entropy below 1.2</p>
+
+    Download <a href="SI/distribution_entropy_of_deletions_insertions_on_SI.csv">SI stats</a> CSV file.
+
+    {html_SI_stats}
+    """
+    return html
+
+def report_SI_histogram():
+
+    # ====================== add images with deletion length histogram (on SI)
+    html  = '<div class="image-grid">'
+    for label in labels:
+        html +=f'<figure><img src="SI/hist_deletions_on_SI_{label}.png"><figcaption>{label}</figcaption></figure>'
+    html += '</div>'
+    return html
+
+def report_SI_localisation():
+
+
+    # ========================== add images distribution INDELS localisation (on SI)
+
+    html = "<h3>Localisation INDELs on SI</h3>"
+
+    import plotly.express as px
+    df = pd.concat([pd.read_csv(f"SI/summary_deletions_{label}.csv").assign(label=label) 
+            for label in labels])
+    fig = px.histogram(
+        df,
+        x="rpos",
+        color="label",       # one color per sample
+        barmode="stack",    # or "group" for side-by-side bars
+        nbins=1000,             # adjust as needed
+        labels={"rpos": "location (bp)"},
+        title="Deletions localisation per Sample"
+    )
+    div = fig.to_html(full_html=False, include_plotlyjs='cdn')
+    html += f"<figure>{div}<figcaption></figcaption></figure>"
+    df = pd.concat([pd.read_csv(f"SI/summary_insertions_{label}.csv").assign(label=label) 
+            for label in labels])
+    fig = px.histogram(
+        df,
+        x="rpos",
+        color="label",       # one color per sample
+        barmode="stack",    # or "group" for side-by-side bars
+        nbins=1000,             # adjust as needed
+        labels={"rpos": "location (bp)"},
+        title="Insertions localisation per Sample"
+    )
+    div = fig.to_html(full_html=False, include_plotlyjs='cdn')
+    html += f"<figure>{div}<figcaption></figcaption></figure>"
+    return html
+
+
+def report_fastx_links():
+
+    # Links towards the fastq
+
+    html = '<h3 id="fastq">FastQ</h3> FastQ an FastA file were creating by extacting reads with INDELs found on the SI (size >100bp)'
+    html+="""<ul>
+    <li>
+    FastQ with the reads found with insertions on the SI are in <a href="./SI/fastq">directory</a> 
+    </li>
+    <li>
+    FastA with the reads found with insertions on the SI are in <a href="./SI/fasta">directory</a>
+    </li>
+    <li>
+    FastQ with the reads found with deletions on the SI are in <a href="./SI/fastq">directory</a>
+    </li>
+    <li>
+    FastA with the reads found with deletions on the SI are in <a href="./SI/fasta">directory</a>
+    </li>
+    </ul>
+    """
+    return html
+
+
+onsuccess:
+
+
+    # ======================================== final HTML report
+    html_content = report_intro()
+    if use_plasmids:
+        html_content += report_sample_information()
+        html_content += report_plasmid_section()
+        html_content += report_plasmids_description()
+        html_content += report_plasmids_scatter_plots()
+        html_content += report_plasmids_summary()
+
+    html_content += report_SI_intro()
+    html_content += get_SI_images_html()
+    html_content += report_SI_table()
+    html_content += report_SI_histogram()
+    html_content += report_SI_localisation()
+    html_content += report_fastx_links()
+
+
+    manager.teardown()
+
+    from sequana.modules_report.summary import SequanaReport
+
+    data = manager.getmetadata()
+    s = SequanaReport(data, html_content)
+
+    ## Save to file
+    #with open("summary.html", "w") as f:
+    #    f.write(html_content)
