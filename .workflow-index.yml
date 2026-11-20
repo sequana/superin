@@ -1,7 +1,7 @@
 language: Snakemake
 name: sequana_superin
 description: A simple pipeline to study super integron insertions and deletions
-url: https://github.com/sequana/sequana_superin/blob/master/sequana_pipelines/superin/superin.rules
+url: https://github.com/sequana/superin/blob/main/sequana_pipelines/superin/superin.rules
 categories: [NGS, snakemake, sequana]
 authors:
     - firstname: Thomas
