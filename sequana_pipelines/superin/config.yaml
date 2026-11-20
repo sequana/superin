@@ -38,6 +38,15 @@ apptainers:
 
 
 ################################################################################
+# minimap2: mapping of the reads onto the super integron (SI) reference
+#
+# threads: number of threads used by minimap2 (and samtools sort)
+# options: extra minimap2 options
+minimap2:
+    threads: 4
+    options: "-x map-ont"
+
+################################################################################
 # sample_pattern
 #
 # You may have trailing words that are in sample names but not wanted. Consider
