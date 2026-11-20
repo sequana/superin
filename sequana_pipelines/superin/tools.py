@@ -38,7 +38,10 @@ def get_INDELs(bamfile, fasta_file, minimal_length_indels=100):
     print(f"Number of mapped reads (flag 0,16) : {N}")
     b1 = BAM(bamfile)
     
-    genome = FastA(fasta_file).sequences[0]
+    # deleted sequences are taken from the contig the read is mapped on (not from the first contig of the file)
+    import pysam
+
+    genome = pysam.FastaFile(fasta_file)
 
     N = 0
    
@@ -58,7 +61,7 @@ def get_INDELs(bamfile, fasta_file, minimal_length_indels=100):
                     position_query += length
                     position_ref += length
                 elif typ == 'D':
-                    sequences.append(('D', position_query, length, position_ref,genome[position_ref:position_ref+length]))
+                    sequences.append(('D', position_query, length, position_ref,genome.fetch(a.reference_name, position_ref, position_ref+length)))
                     position_query += 0
                     # get the sequence deleted from the genome
                     position_ref += length
@@ -72,6 +75,7 @@ def get_INDELs(bamfile, fasta_file, minimal_length_indels=100):
                     data.append([typ,qpos,L,rpos,sequence, a.qname, a.rname])
                 if typ=='D' and len(sequence)>minimal_length_indels:
                     data.append([typ,qpos,L,rpos,sequence, a.qname, a.rname])
+    genome.close()
     df = pd.DataFrame(data)
     if len(data):
         df.columns = ['typ', 'qpos', 'L', 'rpos', 'sequence', 'qname', 'rname']

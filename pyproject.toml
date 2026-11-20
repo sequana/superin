@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "sequana-superin"
-version = "0.1.0"
+version = "0.1.1"
 description = "A simple pipeline to study super integron insertions and deletions"
 authors = ["Sequana Team"]
 license = "BSD-3"
