@@ -1,4 +1,4 @@
-# Schema validator for the quality_control
+# Schema validator for the superin pipeline
 # author: Thomas Cokelaer
 
 type: map

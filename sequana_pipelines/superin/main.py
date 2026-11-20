@@ -24,7 +24,7 @@ NAME = "superin"
 
 help = init_click(NAME, groups={
     "Pipeline Specific": [
-        "--method", "--skip-multiqc"],
+        "--input-bam-pattern", "--samplesheet", "--plasmids-directory", "--SI-reference-file"],
         }
 )
 

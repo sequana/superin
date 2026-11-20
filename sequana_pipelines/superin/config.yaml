@@ -1,5 +1,5 @@
 # ============================================================================
-# Config file for Quality Control
+# Config file for the superin pipeline
 # ==========================================[ Sections for the users ]========
 #
 # One of input_directory, input_pattern and input_samples must be provided
@@ -60,13 +60,13 @@ minimap2:
 
 
 ##############################################################################
-# Your section
+# INDELs_filter: selection of the insertions and deletions (INDELs)
 #
 # :Parameters:
 #
-# - options: string with any valid FastQC options
-#
-#
+# - entropy_above: ignore INDELs whose sequence entropy is lower (natural log, max is 1.39)
+# - SI_start_position: ignore INDELs located before this position on the SI
+# - minimal_indel_length: ignore INDELs shorter than this length (bp)
 #
 INDELs_filter:
     entropy_above: 1.2

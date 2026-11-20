@@ -196,6 +196,8 @@ Changelog
 ========= ====================================================================
 Version   Description
 ========= ====================================================================
+0.1.1     Fix deleted sequences taken from the first contig of the reference
+          instead of the contig the read is mapped on.
 0.1.0     **First release.**
 ========= ====================================================================
 
