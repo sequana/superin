@@ -13,9 +13,7 @@
 import os
 
 import rich_click as click
-import click_completion
 
-click_completion.init()
 
 
 from sequana_pipetools.options import *
@@ -59,7 +57,7 @@ help = init_click(NAME, groups={
     "--SI-reference-file",
     "SI_reference_file",
     required=True,
-    help="""directory where to find the plasmid references. samplesheet will give filename (without directory)""")
+    help="""FASTA file of the super integron (SI) reference""")
 
 def main(**options):
 
@@ -79,17 +77,35 @@ def main(**options):
     cfg.input_bam_pattern = os.path.abspath(options.input_bam_pattern)
     manager.exists(cfg.input_directory)
     
-    cfg.SI_reference_file = os.path.abspath(options.SI_reference_file)
-    cfg.plasmids_directory = os.path.abspath(options.plasmids_directory)
+    # copy the references in the working directory for book keeping. The pipeline uses the copies.
+    import shutil
 
-    # no need for abspath. we will copy it
-    cfg.samplesheet = options.samplesheet
+    import pandas as pd
+
+    references_directory = os.path.join(manager.workdir, "references")
+    os.makedirs(references_directory, exist_ok=True)
+
+    SI_reference_file = os.path.abspath(options.SI_reference_file)
+    manager.exists(SI_reference_file)
+    shutil.copy(SI_reference_file, references_directory)
+
+    # the samplesheet gives the names (without directory) of the plasmid references
+    plasmids_directory = os.path.abspath(options.plasmids_directory)
+    for name in pd.read_csv(options.samplesheet)["reference"].dropna().unique():
+        manager.exists(os.path.join(plasmids_directory, name))
+        shutil.copy(os.path.join(plasmids_directory, name), references_directory)
+
+    cfg.SI_reference_file = os.path.join(os.path.abspath(references_directory), os.path.basename(SI_reference_file))
+    cfg.plasmids_directory = os.path.abspath(references_directory)
+
+    # abspath is required: the rulegraph rule runs snakemake from a
+    # sub-directory, where a relative path would not be found.
+    cfg.samplesheet = os.path.abspath(options.samplesheet)
 
     # finalise the command and save it; copy the snakemake. update the config
     # file and save it.
     manager.teardown()
 
-    import shutil
     shutil.copy(options.samplesheet, manager.workdir)
 
 

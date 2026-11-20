@@ -3,8 +3,6 @@
 
 type: map
 mapping:
-    "sequana_wrappers":
-        type: str
     "input_directory":
         type: str
         required: False
@@ -29,6 +27,16 @@ mapping:
         type: str
         required: False
 
+
+    "minimap2":
+        type: map
+        mapping:
+            "threads":
+                type: int
+                required: False
+            "options":
+                type: str
+                required: False
 
     "INDELs_filter":
         type: map

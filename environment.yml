@@ -1,10 +1,11 @@
 name: sequana_superin
-
 channels:
 - conda-forge
 - bioconda
 - defaults
 - r
-
 dependencies:
 - graphviz
+- minimap2
+- samtools
+- pulp>=2.8

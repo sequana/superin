@@ -20,16 +20,15 @@ else:
     use_plasmids = False
 
 expected_output = [
-        expand("SI/fastq/{label}_reads_with_deletions.fastq", label=labels),
-        expand("SI/fasta/{label}_reads_with_deletions.fasta", label=labels),
-        expand("SI/fastq/{label}_reads_with_insertions.fastq", label=labels),
-        expand("SI/fasta/{label}_reads_with_insertions.fasta", label=labels),
+        expand("SI/fastq/{label}_reads_with_deletions.fastq.gz", label=labels),
+        expand("SI/fasta/{label}_reads_with_deletions.fasta.gz", label=labels),
+        expand("SI/fastq/{label}_reads_with_insertions.fastq.gz", label=labels),
+        expand("SI/fasta/{label}_reads_with_insertions.fasta.gz", label=labels),
         "nanocap_filtered_fastqs/stats.csv",
         "SI/position_deletions.png",
         "SI/position_insertions.png",
         "SI/distribution_entropy_of_deletions_insertions_on_SI.csv",
         ".sequana/rulegraph.svg",
-        expand("SI/distribution_entropy_of_deletions_insertions_on_SI_{label}.png", label=labels)
 ]
 
 
@@ -83,11 +82,15 @@ if use_plasmids:
             bai="filtered_BAM_files/{label}.{plasmid}.sorted.bam.bai"
         container:
             config['apptainers']['tools']
+        log:
+            "filtered_BAM_files/filter_nanocap_BAM.{label}.{plasmid}.log.txt"
         shell:
             """
+            (
             samtools index {input.bam}
             samtools view -b -h {input.bam} {wildcards.plasmid} > {output.bam}
             samtools index {output.bam}
+            ) >{log} 2>&1
             """
 
     rule scatter_plots:
@@ -111,24 +114,44 @@ if use_plasmids:
 
 
             data, stats = tools.get_INDELs(input.bam, input.fasta, minimal_length_indels=params.min_length)
-            N = len(df)
 
-            for typ_ in ['D', 'I']:
+            plasmid = samples_plasmids[wildcards.label]
+            import pysam
+            with pysam.AlignmentFile(input.bam) as bam:
+                plasmid_length = bam.get_reference_length(plasmid)
+
+            for typ_, name in [('D', 'Deletion'), ('I', 'Insertion')]:
 
                 try:
                     dd = data.query("typ==@typ_ and L>=@params.min_length")[['rpos', 'L']]
                 except:
                     dd = data
 
+                # axes limits adapted to the plasmid and to the data
+                ymax = max(1000, int(dd['L'].max() * 1.1)) if len(dd) else 1000
+                ymax = int(round(ymax, -2))
+
                 im = ScatterHist(dd)
-                ax0, axX, axY = im.plot(kargs_histx={'bins': range(0,6000, 100)}, 
-                            kargs_histy={'bins': range(0,2600, 100)})
-                ax0.set_xlim([0, 6000])
-                ax0.set_ylim([0, 2600])
-                axX.set_xlim([0, 6000])
-                axY.set_ylim([0, 2600])
+                ax0, axX, axY = im.plot(
+                    kargs_scatter={'s': 20, 'c': 'b', 'alpha': 0.5},
+                    offset_x=0.14,
+                    kargs_histx={'bins': range(0, plasmid_length + 100, 100)},
+                    kargs_histy={'bins': range(0, ymax + 100, 100)})
+                ax0.set_xlim([0, plasmid_length])
+                ax0.set_ylim([0, ymax])
+                axX.set_xlim([0, plasmid_length])
+                axY.set_ylim([0, ymax])
                 axX.set_xticklabels([])
                 axY.set_yticklabels([])
+
+                ax0.set_xlabel(f"Position on {plasmid} (bp)")
+                ax0.set_ylabel(f"{name} length (bp)")
+                axX.yaxis.set_label_position("right")
+                axX.set_ylabel("Count")
+                axY.set_xlabel("Count")
+                from matplotlib.ticker import MaxNLocator
+                axX.yaxis.set_major_locator(MaxNLocator(integer=True))
+                axY.xaxis.set_major_locator(MaxNLocator(integer=True))
 
                 # read again to save more information
                 try:
@@ -143,19 +166,27 @@ if use_plasmids:
                     savefig(output.png_ins, dpi=200)
                     dd.to_csv(output.csv_ins, index=False)
 
+            # mean depth of coverage over the plasmid (same as 'meandepth' in samtools coverage)
+            coverage = pysam.coverage("-r", plasmid, input.bam).strip().split("\n")[-1].split("\t")
+            mean_coverage = int(round(float(coverage[6])))
+
             with open(output.stats, "w") as fout:
-                fout.write(f"sample,nreads,insertion,deletion\n{wildcards.label},{stats['N']},{stats['insertions']},{stats['deletions']}\n")
+                fout.write(f"sample,nreads,insertion,deletion,mean_coverage\n{wildcards.label},{stats['N']},{stats['insertions']},{stats['deletions']},{mean_coverage}\n")
 
 
     rule gather_stats:
         input:
-            expand("plasmids/{label}_summary.csv", label=labels)
+            summary = expand("plasmids/{label}_summary.csv", label=labels),
+            on_SI = expand("mapped_insertions_on_SI/insertions_summary_SI_{label}.csv", label=labels)
         output:
             csv = "plasmids/deletions_insertions_stats.csv"
         run:
             import pandas as pd
-            df = pd.concat([pd.read_csv(file) for file in input], axis=0)
-            df = df[['sample', 'nreads', 'insertion', 'deletion']]
+            df = pd.concat([pd.read_csv(file) for file in input.summary], axis=0)
+            df = df[['sample', 'nreads', 'insertion', 'deletion', 'mean_coverage']]
+            df.columns = ['sample', 'mapped_reads', 'insertions', 'deletions', 'mean_coverage']
+            # reads of the insertions that map back on the SI (flags 0, 16): one row per read
+            df['insertions_on_SI'] = [len(pd.read_csv(file)) for file in input.on_SI]
             df.to_csv(output.csv, index=False)
 
 
@@ -188,37 +219,60 @@ rule mapped_on_SI:
     """map the nanocap output files onto the SI only"""
     input:
         fastq = config['input_directory'] + "/{label}.fastq.gz",
-        SI=super_integron_reference
+        reference=super_integron_reference
     output:
-        bam="SI/{label}.sorted.bam",
-        bai="SI/{label}.sorted.bam.bai"
+        bam="SI/{label}.sorted.bam"
+    threads: config["minimap2"]["threads"]
+    params:
+        options=config["minimap2"]["options"]
     container:
         config['apptainers']['tools']
     log:
         "SI/mapped_on_SI.{label}.log.txt"
     shell:
-        """
-        minimap2 -t 4 -x map-ont -a {input.SI} {input.fastq} 2>{log} | samtools view -bh | samtools sort > {output.bam} 
-        samtools index {output.bam}
-        """
+        manager.get_shell("minimap2/align", "v1")
+
+
+rule index_SI_bam:
+    input:
+        bam=rules.mapped_on_SI.output.bam
+    output:
+        bai="SI/{label}.sorted.bam.bai"
+    container:
+        config['apptainers']['tools']
+    log:
+        "SI/index_SI_bam.{label}.log.txt"
+    shell:
+        "samtools index {input.bam} >{log} 2>&1"
 
 if use_plasmids:
     rule map_back_insertions_on_SI:
         input:
             fastq=rules.save_plasmid_insertions_in_fastq.output.fastq,
-            SI=super_integron_reference
+            reference=super_integron_reference
         output:
-            bam = "mapped_insertions_on_SI/insertions_{label}.sorted.bam",
-            bai = "mapped_insertions_on_SI/insertions_{label}.sorted.bam.bai"
+            bam = "mapped_insertions_on_SI/insertions_{label}.sorted.bam"
+        threads: config["minimap2"]["threads"]
+        params:
+            options=config["minimap2"]["options"]
         container:
             config['apptainers']['tools']
         log:
             "mapped_insertions_on_SI/map_back_insertions_on_SI.{label}.log.txt"
         shell:
-            """
-            minimap2 -t 4 -x map-ont -a {input.SI} {input.fastq} 2>{log} | samtools view -bh | samtools sort > {output.bam} 
-            samtools index {output.bam}
-            """
+            manager.get_shell("minimap2/align", "v1")
+
+    rule index_insertions_bam:
+        input:
+            bam=rules.map_back_insertions_on_SI.output.bam
+        output:
+            bai = "mapped_insertions_on_SI/insertions_{label}.sorted.bam.bai"
+        container:
+            config['apptainers']['tools']
+        log:
+            "mapped_insertions_on_SI/index_insertions_bam.{label}.log.txt"
+        shell:
+            "samtools index {input.bam} >{log} 2>&1"
 
     rule ind_insertions_stats:
         input:
@@ -251,7 +305,7 @@ rule get_excision:
     """
     input:
         bam=rules.mapped_on_SI.output.bam,
-        bai=rules.mapped_on_SI.output.bai,
+        bai=rules.index_SI_bam.output.bai,
         fasta=super_integron_reference
     output:
         png="SI/distribution_entropy_of_deletions_insertions_on_SI_{label}.png",
@@ -356,16 +410,13 @@ rule get_fastq_fasta_deletions:
         csv=rules.get_excision.output.csv_del,
         fastq = config["input_directory"] + "/{label}.fastq.gz",
     output:
-        fastq="SI/fastq/{label}_reads_with_deletions.fastq",
-        fasta="SI/fasta/{label}_reads_with_deletions.fasta"
+        fastq="SI/fastq/{label}_reads_with_deletions.fastq.gz",
+        fasta="SI/fasta/{label}_reads_with_deletions.fasta.gz"
     run:
         import pandas as pd
-        from sequana import FastQ
+        from sequana_pipelines.superin import tools
         identifiers = pd.read_csv(input.csv)['qname'].values
-        f = FastQ(input.fastq)
-        f.select_reads(identifiers, output.fastq)
-        f = FastQ(output.fastq)
-        f.to_fasta(output.fasta)
+        tools.select_reads_gz(input.fastq, identifiers, output.fastq, output.fasta)
 
 
 
@@ -374,16 +425,13 @@ rule get_fastq_fasta_insertions:
         csv=rules.get_excision.output.csv_ins,
         fastq = config["input_directory"] + "/{label}.fastq.gz",
     output:
-        fastq="SI/fastq/{label}_reads_with_insertions.fastq",
-        fasta="SI/fasta/{label}_reads_with_insertions.fasta"
+        fastq="SI/fastq/{label}_reads_with_insertions.fastq.gz",
+        fasta="SI/fasta/{label}_reads_with_insertions.fasta.gz"
     run:
         import pandas as pd
-        from sequana import FastQ
+        from sequana_pipelines.superin import tools
         identifiers = pd.read_csv(input.csv)['qname'].values
-        f = FastQ(input.fastq)
-        f.select_reads(identifiers, output.fastq)
-        f = FastQ(output.fastq)
-        f.to_fasta(output.fasta)
+        tools.select_reads_gz(input.fastq, identifiers, output.fastq, output.fasta)
 
 
 
@@ -427,8 +475,8 @@ rule rulegraph:
     params:
         configname="config.yaml",
         mapper = {},
-    wrapper:
-        f"{manager.wrappers}/wrappers/rulegraph"
+    run:
+        manager.get_run("rulegraph/run", "v1")(input, output, params)
 
 
 rule dot2svg:
@@ -439,7 +487,10 @@ rule dot2svg:
     container:
         config['apptainers']['graphviz']
     shell:
-        """dot -Tsvg {input} -o {output}"""
+        manager.get_shell("graphviz/dot2svg", "v1")
+
+
+localrules: rulegraph, dot2svg
 
 
 ########################################################################33
@@ -476,14 +527,13 @@ def report_intro():
 def report_sample_information():
 
     from sequana import FastA
-    html = """<h1 id="info">Sample information</h1>"""
-    html += "<p> Here is the correspondance of samples and plasmids used. </p>"
+    html = "<p> Here is the correspondance of samples and plasmids used. </p>"
     # sample information
     samples = sorted(samples_plasmids.keys())
     df = pd.DataFrame({
             'sample': samples, 
             'plasmid': [samples_plasmids[x] for x in samples],
-            'reference': [samples_references[x] for x in samples]
+            'reference': [os.path.relpath(samples_references[x]) for x in samples]
         })
     #Get plasmids size and therefore length to estimate coverage
     lengths = {}
@@ -497,13 +547,13 @@ def report_sample_information():
 
 def report_plasmids_scatter_plots():
     # scatter plots
-    html ="<h3>Insertions</h3>"
+    html = '<h3 id="plasmid_insertions">Insertions</h3>'
     html += '<div class="image-grid">'
     for label in labels:
         html += f'<figure><img src="plasmids/{label}_insertions_distribution.png"><figcaption>{label}</figcaption></figure>'
     html += '</div>'
 
-    html += "<h3>Deletions</h3>"
+    html += '<h3 id="plasmid_deletions">Deletions</h3>'
     html += '<div class="image-grid">'
     for label in labels:
         html += f'<figure><img src="plasmids/{label}_deletions_distribution.png"><figcaption>{label}</figcaption></figure>'
@@ -520,13 +570,16 @@ def get_html_plasmid_stats():
     stats = stats[["sample", 'N', 'mean_length']]
     stats["mean_length"] = [int(x) for x in stats.mean_length.values]
     stats.columns = ["sample", "Number of reads (>1000bp)", "Mean read length (>1000bp)"]
+    # mean depth of coverage on the plasmid (from the plasmid-filtered BAM files)
+    coverage = pd.read_csv(rules.gather_stats.output.csv)[["sample", "mean_coverage"]]
+    coverage.columns = ["sample", "Mean coverage on plasmid"]
+    stats = stats.merge(coverage, on="sample", how="left")
     table_html_mapped_reads_plasmids = get_html_table(stats, "stats_plasmids")
     return table_html_mapped_reads_plasmids
 
 def report_plasmids_description():
 
     html_info_INDELs = """
-<h2>Insertions/Deletions on the plasmids</h2>
 We extract the INDELs from the BAM files, filtered INDELs with size below 100bp to keep only the largest ones. We save information about the deletions and insertions in CSV files that are provided in the <a href="./plasmids">plasmids/</a> directory. They are called SAMPLE_deletions_distribution.csv and SAMPLE_insertions_distribution.csv an. They are in CSV format with this header/example
     
     <pre>    typ,qpos,L,rpos,sequence,qname,rname,entropy
@@ -553,30 +606,71 @@ def report_plasmid_section():
 
     table_html_mapped_reads_plasmids = get_html_plasmid_stats()
 
+    # example with the first sample: the BAM file is mapped on the reference of its plasmid
+    sample = sorted(samples_plasmids.keys())[0]
+    plasmid = samples_plasmids[sample]
+    reference = os.path.relpath(samples_references[sample])
+    igv_example = f"igv -g {reference}  filtered_BAM_files/{sample}.{plasmid}.sorted.bam"
+
     html = f"""
-    <h2 id="read_stats">Number of reads of interest</h2>
     <p>We first filtered the BAM files from Nanocap to keep the reads that map on the plasmids. Those files are in the directory  
     <a href="filtered_BAM_files">filtered_BAM_files</a> and can be visualised e.g. using<br>
     <br><pre>
-    igv -g references/vibrio_and_pV827.fa  filtered_BAM_files/V961.p2594.sorted.bam
+    {igv_example}
     </pre>
-    The following table gives the number of reads and their mean length after filtering for reads with length below 1000bp. See nanocap reports for more details.
+    The following table gives the number of reads and their mean length after filtering for reads with length below 1000bp, and the mean depth of coverage on the plasmid (from the filtered BAM files). See nanocap reports for more details.
     </p>
     {table_html_mapped_reads_plasmids}
     """
     return html
 
 def report_plasmids_summary():
-    df = pd.read_csv(rules.gather_stats.output.csv)
-    html = "<h3>Summary</h3>"
+    min_length = config["INDELs_filter"]["minimal_indel_length"]
+    df = pd.read_csv(rules.gather_stats.output.csv).drop(columns="mean_coverage")
+
+    html = '<h3 id="plasmid_summary">Summary</h3>'
+    html += f"""
+    <p>The following table summarises the INDELs found on the plasmids (also available in
+    <a href="./plasmids/deletions_insertions_stats.csv">plasmids/deletions_insertions_stats.csv</a>):</p>
+    <ul>
+    <li><b>mapped_reads</b>: number of reads mapped on the plasmid reference as primary alignments
+        (SAM flags 0 and 16), i.e. without secondary or supplementary alignments. Only those reads
+        are used to search for INDELs.</li>
+    <li><b>insertions</b> and <b>deletions</b>: number of insertions (resp. deletions) found in those
+        reads that are longer than {min_length} bp. A read may contain several INDELs.</li>
+    <li><b>insertions_on_SI</b>: the insertion sequences were extracted and mapped back onto the SI.
+        This is the number of those reads that map (flags 0 and 16).
+        See the directory <a href="./mapped_insertions_on_SI">mapped_insertions_on_SI</a>.</li>
+    </ul>
+    """
     html += get_html_table(df, "stast_indels", )
     return html
 
 
 def report_SI_intro():
-    html = """
-    <h2 id="SI">INDELs on the SI.</h2>
-    We could map the insertions found in the plasmid onto the SI. However, they may not map well since they are flanked by plasmids regions. Instead, it is better to identify them by searching for large deletions in the SI. We filter reads that have a length below 1000bp. We also filter the INDELs with length below 100bp. Here below we show the entropy of the insertions and deletions. Most insertions have low entropy and should probably be discared."""
+    cfg = config["INDELs_filter"]
+    html = f"""
+    <p>An insertion found in a plasmid corresponds to an excision in the SI. A read that maps on the plasmid has
+    the structure P1-I-P2, where P1 and P2 are two parts of the plasmid and I the inserted sequence. Such a read does not
+    map well on the SI since P1 and P2 are not found in the SI. Deletions are therefore simply extracted from the
+    BAM files obtained by mapping the reads onto the SI only (reads of type SI1-D-SI2). From these alignments, we know
+    the positions and the sequences of the deleted regions. In addition, the insertions found on the plasmids are mapped
+    back onto the SI to figure out where they come from (see the column <b>insertions_on_SI</b> of the summary table above).</p>
+
+    <p>The reads (longer than 1000 bp) are mapped onto the SI. Only the reads mapped with the SAM flags 0 and 16 are used. The INDELs
+    are then selected using the following parameters, defined in the section <code>INDELs_filter</code> of the
+    configuration file <code>config.yaml</code>:</p>
+    <ul>
+    <li><b>minimal_indel_length = {cfg["minimal_indel_length"]}</b>: only the INDELs longer than {cfg["minimal_indel_length"]} bp are kept.</li>
+    <li><b>entropy_above = {cfg["entropy_above"]}</b>: some INDELs are artefacts with a low-complexity sequence
+        (e.g., GTGTGTGTGTGT), most probably nanopore errors. We compute the Shannon entropy of each INDEL sequence
+        (natural logarithm, between 0 and ln(4)=1.39 for the 4 nucleotides) and ignore the INDELs with an entropy
+        lower than {cfg["entropy_above"]}. The figures below show the entropy distributions of the insertions and deletions;
+        most of the low-entropy INDELs are insertions.</li>
+    <li><b>SI_start_position = {cfg["SI_start_position"]}</b>: the INDELs located before the position
+        {cfg["SI_start_position"]} on the SI reference are ignored. </li>
+    </ul>
+    """
 
     return html
 
@@ -603,9 +697,20 @@ def report_SI_stats():
 def report_SI_table():
 
     html_SI_stats = report_SI_stats()
+    cfg = config["INDELs_filter"]
 
     html = f"""
-    <p>we can keep reads with correct flag (mapped), and keep reads that have position above  {config["INDELs_filter"]["SI_start_position"]} on the SI. We can also filter event with low entropy below 1.2</p>
+    <p>The following table gives the number of INDELs found on the SI for each sample (rows):</p>
+    <ul>
+    <li><b>mapped reads</b>: number of reads mapped on the SI (flags 0 and 16).</li>
+    <li><b>insertions</b>, <b>deletions</b>: number of insertions (resp. deletions) longer than
+        {cfg["minimal_indel_length"]} bp. <b>percent_insertions</b>, <b>percent_deletions</b>: same numbers
+        in percentage of the mapped reads.</li>
+    <li><b>filtered_insertions</b>, <b>filtered_deletions</b>: number of insertions (resp. deletions) that
+        pass all the filters: length &gt; {cfg["minimal_indel_length"]} bp, entropy &gt; {cfg["entropy_above"]}
+        and position on the SI &gt; {cfg["SI_start_position"]}. <b>percent_filtered_insertions</b>,
+        <b>percent_filtered_deletions</b>: same numbers in percentage of the mapped reads.</li>
+    </ul>
 
     Download <a href="SI/distribution_entropy_of_deletions_insertions_on_SI.csv">SI stats</a> CSV file.
 
@@ -624,38 +729,69 @@ def report_SI_histogram():
 
 def report_SI_localisation():
 
-
-    # ========================== add images distribution INDELS localisation (on SI)
-
-    html = "<h3>Localisation INDELs on SI</h3>"
-
+    # ========================== add figures about the localisation of the INDELs (on SI)
+    import numpy as np
     import plotly.express as px
-    df = pd.concat([pd.read_csv(f"SI/summary_deletions_{label}.csv").assign(label=label) 
-            for label in labels])
-    fig = px.histogram(
-        df,
-        x="rpos",
-        color="label",       # one color per sample
-        barmode="stack",    # or "group" for side-by-side bars
-        nbins=1000,             # adjust as needed
-        labels={"rpos": "location (bp)"},
-        title="Deletions localisation per Sample"
-    )
-    div = fig.to_html(full_html=False, include_plotlyjs='cdn')
-    html += f"<figure>{div}<figcaption></figcaption></figure>"
-    df = pd.concat([pd.read_csv(f"SI/summary_insertions_{label}.csv").assign(label=label) 
-            for label in labels])
-    fig = px.histogram(
-        df,
-        x="rpos",
-        color="label",       # one color per sample
-        barmode="stack",    # or "group" for side-by-side bars
-        nbins=1000,             # adjust as needed
-        labels={"rpos": "location (bp)"},
-        title="Insertions localisation per Sample"
-    )
-    div = fig.to_html(full_html=False, include_plotlyjs='cdn')
-    html += f"<figure>{div}<figcaption></figcaption></figure>"
+
+    def load(typ):
+        df = pd.concat([pd.read_csv(f"SI/summary_{typ}_{label}.csv").assign(label=label) for label in labels])
+        # a deletion spans [rpos, rpos+L]; an insertion has a single position on the SI
+        df["end"] = df["rpos"] + df["L"] if typ == "deletions" else df["rpos"]
+        return df
+
+    # same colors for a given sample in all the figures
+    colors = {label: px.colors.qualitative.Plotly[i % 10] for i, label in enumerate(labels)}
+    orders = {"label": list(labels)}
+
+    # same x axis limits in all the figures: the whole SI reference
+    import pysam
+    with pysam.FastaFile(super_integron_reference) as fasta:
+        SI_length = fasta.lengths[0]
+
+    def track(df, ylabel, step):
+        """number of INDELs per position of the SI (bins of 'step' bp) and per sample
+
+        A deletion is counted in all the bins between its start and its end. An insertion is counted in
+        the bin where it is located.
+        """
+        nbins = SI_length // step + 2
+        rows = []
+        for label in labels:
+            sub = df.query("label == @label")
+            diff = np.zeros(nbins + 1)
+            np.add.at(diff, (sub["rpos"] // step).astype(int), 1)
+            np.add.at(diff, (sub["end"] // step).astype(int) + 1, -1)
+            rows.append(pd.DataFrame({"position": np.arange(nbins) * step, "count": np.cumsum(diff)[:nbins], "label": label}))
+        fig = px.line(
+            pd.concat(rows),
+            x="position",
+            y="count",
+            color="label",
+            color_discrete_map=colors,
+            category_orders=orders,
+            line_shape="hv",
+            labels={"position": "Position on the SI (bp)", "count": ylabel, "label": "Sample"},
+        )
+        fig.update_xaxes(range=[0, SI_length])
+        div = fig.to_html(full_html=False, include_plotlyjs="cdn")
+        return div
+
+    html = '<h3 id="SI_localisation">Localisation INDELs on SI</h3>'
+    html += """
+    <p>Only the INDELs passing the filters described above are shown. The figures are drawn in bins along the SI
+    reference (100 bp for the deletions, 1000 bp for the insertions, which are less numerous). A read may contain several INDELs.</p>
+    """
+
+    html += "<h4>Deletions</h4>"
+    html += "<figure>" + track(load("deletions"), "Number of deletions covering the position", step=100) + """
+    <figcaption>Number of deletions covering each position of the SI (bins of 100 bp). A deletion is counted at all the positions between
+    its start and its end. Peaks show the regions that are frequently excised; the width of a peak reflects the size of
+    the deletions.</figcaption></figure>"""
+
+    html += "<h4>Insertions</h4>"
+    html += "<figure>" + track(load("insertions"), "Number of insertions per 1000 bp", step=1000) + """
+    <figcaption>Number of insertions found in each bin of 1000 bp of the SI. An insertion has a single position
+    on the reference.</figcaption></figure>"""
     return html
 
 
@@ -663,7 +799,7 @@ def report_fastx_links():
 
     # Links towards the fastq
 
-    html = '<h3 id="fastq">FastQ</h3> FastQ an FastA file were creating by extacting reads with INDELs found on the SI (size >100bp)'
+    html = 'FastQ an FastA file were creating by extacting reads with INDELs found on the SI (size >100bp)'
     html+="""<ul>
     <li>
     FastQ with the reads found with insertions on the SI are in <a href="./SI/fastq">directory</a> 
@@ -686,28 +822,42 @@ onsuccess:
 
 
     # ======================================== final HTML report
-    html_content = report_intro()
+    # Each section is declared in the sections of the report so that it appears (with its subsections)
+    # in the table of contents (sidebar). The title of a section is added by the report template.
+    from sequana.utils import config as report_config
+
+    sections = []
     if use_plasmids:
-        html_content += report_sample_information()
-        html_content += report_plasmid_section()
-        html_content += report_plasmids_description()
-        html_content += report_plasmids_scatter_plots()
-        html_content += report_plasmids_summary()
+        sections.append({"name": "Sample information", "anchor": "info", "content": report_sample_information()})
+        sections.append({"name": "Number of reads of interest", "anchor": "read_stats", "content": report_plasmid_section()})
+        sections.append({
+            "name": "Insertions/Deletions on the plasmids",
+            "anchor": "plasmid_indels",
+            "content": report_plasmids_description() + report_plasmids_scatter_plots() + report_plasmids_summary(),
+            "subsections": [
+                ("Insertions", "plasmid_insertions"),
+                ("Deletions", "plasmid_deletions"),
+                ("Summary", "plasmid_summary"),
+            ],
+        })
 
-    html_content += report_SI_intro()
-    html_content += get_SI_images_html()
-    html_content += report_SI_table()
-    html_content += report_SI_histogram()
-    html_content += report_SI_localisation()
-    html_content += report_fastx_links()
+    sections.append({
+        "name": "Mapping back INDELs on the SI",
+        "anchor": "SI",
+        "content": (report_SI_intro() + get_SI_images_html() + report_SI_table()
+                    + report_SI_histogram() + report_SI_localisation()),
+        "subsections": [("Localisation INDELs on SI", "SI_localisation")],
+    })
+    sections.append({"name": "FastQ and FastA files", "anchor": "fastq", "content": report_fastx_links()})
 
+    report_config.summary_sections = sections
 
     manager.teardown()
 
     from sequana.modules_report.summary import SequanaReport
 
     data = manager.getmetadata()
-    s = SequanaReport(data, html_content)
+    s = SequanaReport(data, report_intro())
 
     ## Save to file
     #with open("summary.html", "w") as f:

@@ -102,3 +102,29 @@ def get_INDELs(bamfile, fasta_file, minimal_length_indels=100):
         return pd.DataFrame({'x':[], 'y':[]}), stats 
 
 
+
+
+def select_reads_gz(fastq, identifiers, output_fastq, output_fasta=None):
+    """Extract reads by name from a FastQ file into gzipped FastQ (and FastA) files.
+
+    :param fastq: input FastQ file (gzipped or not)
+    :param identifiers: read names, without starting @ sign and without comments
+    :param output_fastq: gzipped FastQ output
+    :param output_fasta: optional gzipped FastA output
+    """
+    import gzip
+
+    import pysam
+
+    identifiers = set(identifiers)
+    fasta = gzip.open(output_fasta, "wt") if output_fasta else None
+    try:
+        with pysam.FastxFile(fastq) as fin, gzip.open(output_fastq, "wt") as fout:
+            for read in fin:
+                if read.name in identifiers:
+                    fout.write(str(read) + "\n")
+                    if fasta:
+                        fasta.write(f">{read.name}\n{read.sequence}\n")
+    finally:
+        if fasta:
+            fasta.close()
