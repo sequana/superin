@@ -56,6 +56,12 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y apptainer
 
+    # Mount SIF images directly instead of extracting them to a temporary sandbox
+    - name: Install squashfuse
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y squashfuse
+
     # Cache Apptainer image cache (~/.apptainer/cache)
     - name: Cache Apptainer images
       uses: actions/cache@v3
