@@ -17,7 +17,7 @@
 This is the **superin** pipeline from the `Sequana <https://sequana.readthedocs.org>`_ project
 
 :Overview: Study the insertions and deletions (INDELs) of super integrons (SI) in Nanopore reads
-:Input: Nanopore FASTQ files, BAM files (e.g. from `sequana_nanocap <https://github.com/sequana/nanocap>`_), a samplesheet, the SI reference and the plasmid references (FASTA)
+:Input: filtered Nanopore FASTQ files and BAM files (e.g. from `sequana_nanocap <https://github.com/sequana/nanocap>`_), a samplesheet, the SI reference and the plasmid references (FASTA)
 :Output: INDEL tables (CSV), plots (PNG), reads with INDELs (FASTQ/FASTA), BAM files, and an HTML report
 :Status: beta
 :Citation: Cokelaer et al, (2017), 'Sequana': a Set of Snakemake NGS pipelines, Journal of Open Source Software, 2(16), 352, JOSS DOI doi:10.21105/joss.00352
@@ -86,6 +86,14 @@ Initialise the pipeline::
 
 ``--input-directory`` is the directory with the FASTQ files and ``--input-bam-pattern`` the
 directory with the BAM files. Use ``--help`` to see all the options (e.g. SLURM options).
+
+The FASTQ files are the filtered reads produced by `sequana_nanocap <https://github.com/sequana/nanocap>`_,
+i.e. the files ``nanocap/SAMPLE/fastp/SAMPLE.fastq.gz`` (not the raw reads). The pipeline expects them in a
+single flat directory, named ``SAMPLE.fastq.gz``, where ``SAMPLE`` matches the sample names of the BAM files
+and of the samplesheet. Since nanocap stores one sub-directory per sample, gather them with symbolic links::
+
+    mkdir -p data/fastq
+    for f in nanocap/*/fastp/*.fastq.gz; do ln -s "$(realpath $f)" data/fastq/; done
 
 This creates a directory (called ``superin`` by default) with the pipeline and its configuration
 file. The references and the samplesheet are copied in this directory for book keeping. You then
@@ -159,18 +167,28 @@ The pipeline runs the following steps for each sample of the samplesheet:
 
 Main outputs:
 
-=================================================== ===========================================
-File or directory                                   Description
-=================================================== ===========================================
-summary.html                                        final report
-SI/distribution_entropy_of_deletions_insertions_on_SI.csv  INDEL counts on the SI per sample
-SI/position_deletions.png, position_insertions.png  INDEL positions on the SI
-SI/fastq, SI/fasta                                  reads with deletions/insertions on the SI
-plasmids/deletions_insertions_stats.csv             INDEL counts on the plasmids per sample
-plasmids/SAMPLE_*_distribution.{png,csv}            INDELs on the plasmids
-mapped_insertions_on_SI/insertions_summary.csv      plasmid insertions mapped back onto the SI
-nanocap_filtered_fastqs/stats.csv                   statistics on the input FASTQ files
-=================================================== ===========================================
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - File or directory
+     - Description
+   * - ``summary.html``
+     - final report
+   * - ``SI/distribution_entropy_of_deletions_insertions_on_SI.csv``
+     - INDEL counts on the SI per sample
+   * - ``SI/position_deletions.png, position_insertions.png``
+     - INDEL positions on the SI
+   * - ``SI/fastq, SI/fasta``
+     - reads with deletions/insertions on the SI
+   * - ``plasmids/deletions_insertions_stats.csv``
+     - INDEL counts on the plasmids per sample
+   * - ``plasmids/SAMPLE_*_distribution.{png,csv}``
+     - INDELs on the plasmids
+   * - ``mapped_insertions_on_SI/insertions_summary.csv``
+     - plasmid insertions mapped back onto the SI
+   * - ``nanocap_filtered_fastqs/stats.csv``
+     - statistics on the input FASTQ files
 
 
 Rules and configuration details
@@ -196,6 +214,8 @@ Changelog
 ========= ====================================================================
 Version   Description
 ========= ====================================================================
+0.1.2     Fix README rendering on PyPI; document that the input FASTQ files are the
+          nanocap fastp-filtered reads (README and ``--input-directory`` help).
 0.1.1     Fix deleted sequences taken from the first contig of the reference
           instead of the contig the read is mapped on.
 0.1.0     **First release.**

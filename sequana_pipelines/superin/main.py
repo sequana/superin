@@ -22,6 +22,23 @@ from sequana_pipetools import SequanaManager
 
 NAME = "superin"
 
+
+class SuperinInputOptions(ClickInputOptions):
+    """Same as ClickInputOptions but with a --input-directory help specific to superin"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.options[0] = click.option(
+            "--input-directory",
+            "input_directory",
+            default=self.input_directory,
+            type=click.Path(exists=True, file_okay=False),
+            show_default=True,
+            help="""Directory with the FASTQ files named SAMPLE.fastq.gz (flat directory, no sub-directories).
+            These are the filtered reads produced by sequana_nanocap (nanocap/SAMPLE/fastp/SAMPLE.fastq.gz); 
+            symlink them in one directory. SAMPLE must match the names of the BAM files and the samplesheet.""",
+        )
+
 help = init_click(NAME, groups={
     "Pipeline Specific": [
         "--input-bam-pattern", "--samplesheet", "--plasmids-directory", "--SI-reference-file"],
@@ -33,7 +50,7 @@ help = init_click(NAME, groups={
 @click.command(context_settings=help)
 @include_options_from(ClickSnakemakeOptions, working_directory=NAME)
 @include_options_from(ClickSlurmOptions)
-@include_options_from(ClickInputOptions,
+@include_options_from(SuperinInputOptions,
     input_directory="data/fastq",
     add_input_readtag=False)
 @include_options_from(ClickGeneralOptions)
